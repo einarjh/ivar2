@@ -5,6 +5,31 @@ local trim = function(s)
 	return s:match('^()%s*$') and '' or s:match('^%s*(.*%S)')
 end
 
+local wordClass = {
+	f = 'substantiv',
+	m = 'substantiv',
+	n = 'substantiv',
+
+	a = 'adjektiv',
+
+	v = 'verb',
+}
+
+local removeDuplicates = function(tbl)
+	local done = {}
+	local out = {}
+
+	for i=1, #tbl do
+		local v = tbl[i]
+		if(not done[v]) then
+			done[v] = true
+			table.insert(out, v)
+		end
+	end
+
+	return out
+end
+
 local parseData = function(data)
 	if(data:match('ordboksdatabasene')) then
 		return nil, 'Service down. :('
@@ -21,17 +46,17 @@ local parseData = function(data)
 		local doc = htmlparser.parsestr(data)
 		local word = doc[1][1]
 		-- Workaround for mis matched word (partial match)
-		if type(word) == type({}) then
+		if type(word) == "table" then
 			word = doc[1][1][1]
 		end
 		-- First entry
-		local entry = { 
+		local entry = {
 			lookup = {},
 			meaning = {},
 			examples = {},
 		}
 		local addentry = function(lookup)
-			entry = { 
+			entry = {
 				lookup = {},
 				meaning = {},
 				examples = {},
@@ -45,18 +70,20 @@ local parseData = function(data)
 		end
 		-- Here be dragons. This is why we can't have nice things
 		for _, w in pairs(doc) do
-			if _ ~= '_tag' then 
-				if type(w) == type("") then
+			if _ ~= '_tag' then
+				if type(w) == "string" then
 					add(w)
-				elseif type(w) == type({}) then
+				elseif type(w) == "table" then
 					if w['_attr'] and w['_attr'].class == 'oppsgramordklasse' then
-						add(ivar2.util.italic(w[1]))
+						local class = wordClass[w[1]:sub(1, 1)] or w[1]
+
+						add(ivar2.util.underline(class))
 					elseif w['_attr'] and w['_attr'].class == 'oppslagsord b' then
 						local lookup = {}
 						for _, t in pairs(w) do
-							if type(t) == type("") and t ~= "span" then
+							if type(t) == "string" and t ~= "span" then
 								table.insert(lookup, t)
-							elseif type(t[1]) == type("") and t[1] ~= "span" then
+							elseif type(t[1]) == "string" and t[1] ~= "span" then
 								table.insert(lookup, t[1])
 							end
 						end
@@ -64,22 +91,22 @@ local parseData = function(data)
 					-- Extract definitions
 					elseif w['_attr'] ~= nil and w['_attr']['class'] == 'utvidet' then
 						for _, t in pairs(w) do
-							if type(t) == type("") and t ~= "span" then
+							if type(t) == "string" and t ~= "span" then
 								-- Utvidet + kompakt leads to dupes.
 								-- add(t)
-							elseif type(w) == type({}) then
+							elseif type(w) == "table" then
 								if t['_attr'] ~= nil and t['_attr']['class'] == 'tydingC kompakt' then
 									for _, f in pairs(t) do
-										if type(f) == type("") and f ~= 'span' then
+										if type(f) == "string" and f ~= 'span' then
 											add(f)
-										elseif type(f[1]) == type("") and trim(f[1]) ~= "" then
+										elseif type(f[1]) == "string" and trim(f[1]) ~= "" then
 											add(string.format("[%s]", ivar2.util.bold(f[1])))
 										end
 									end
 								end
 							end
 						end
-					elseif type(w[1]) == type("") then
+					elseif type(w[1]) == "string" then
 						if w[1] ~= word then
 							add(w[1])
 						end
@@ -87,6 +114,10 @@ local parseData = function(data)
 				end
 			end
 		end
+
+		-- Remove duplicate entries (such as word classes)
+		entry.meaning = removeDuplicates(entry.meaning)
+
 		for _,entry in pairs(words) do
 			entry.meaning = trim(table.concat(entry.meaning))
 		end
@@ -139,7 +170,7 @@ return {
 		['^%pdokpro (.+)$'] = handleInput,
 		['^%pordbok (.+)$'] = handleInput,
 		['^%pbokmål (.+)$'] = handleInput,
-		['^%pnynorsk (.+)$'] = function(self, source, destination, word) 
+		['^%pnynorsk (.+)$'] = function(self, source, destination, word)
 			handleInput(self, source, destination, word, 'nynorsk')
 		end
 	},

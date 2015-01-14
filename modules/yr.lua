@@ -7,12 +7,7 @@ local iso2utf = iconv.new('utf-8', 'iso-8859-15')
 
 local days = { "Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat" }
 
-local lower = string.lower
-
--- patch string.lower
-string.lower = function(s)
-	return lower(s):gsub('Æ','æ'):gsub('Ø','ø'):gsub('Å','å')
-end
+local lower = ivar2.util.utf8.lower
 
 local parseDate = function(datestr)
 	local year, month, day, hour, min, sec = datestr:match("([^-]+)%-([^-]+)%-([^T]+)T([^:]+):([^:]+):(%d%d)")
@@ -87,9 +82,6 @@ local handleData = function(type, line)
 end
 
 local handleObservationOutput = function(self, source, destination, data)
-	local location = data:match("<location>(.-)</location>")
-	local name = location:match("<name>([^<]+)</name>"):lower():gsub("^%l", string.upper)
-
 	local tabular = data:match("<observations>(.*)</observations>")
 	for stno, sttype, name, distance, lat, lon, source, data in tabular:gmatch([[<weatherstation stno="([^"]+)" sttype="([^"]+)" name="([^"]+)" distance="([^"]+)" lat="([^"]+)" lon="([^"]+)" source="([^"]+)">(.-)</weatherstation]]) do
 		local windDirection = handleData('windDirection', data)
@@ -104,9 +96,9 @@ local handleObservationOutput = function(self, source, destination, data)
 			if windDirection then windDirection = windDirection.name else windDirection = '' end
 			local color
 			if tonumber(temperature.value) > 0 then
-				color = ivar2.util.red
+				color = self.util.red
 			else
-				color = ivar2.util.lightblue
+				color = self.util.lightblue
 			end
 			-- Use the first result
 			return '%s °C (feels like %s °C), %s %s (%s, %s)', color(temperature.value), color(feelsLike(temperature.value, windSpeed)), windDirection, windSpeedname, name, time
@@ -199,7 +191,7 @@ local function handleOutput(source, destination, seven, data, city, try)
 			end
 		end
 
-		table.insert(out, string.format("\002%s\002 (%s): %s", name, country, formatPeriod(now)))
+		table.insert(out, string.format("Current weather in \002%s\002 (%s): %s", name, country, formatPeriod(now)))
 
 		if(later) then
 			table.insert(out, string.format("\002Tonight\002: %s", formatPeriod(later)))
@@ -215,6 +207,19 @@ local function handleOutput(source, destination, seven, data, city, try)
 	ivar2:Msg('privmsg', destination, source, table.concat(out, " - "))
 end
 
+local splitInput = function(input)
+	input = lower(ivar2.util.trim(input))
+
+	if(input:find(',', 1, true)) then
+		local place, country = input:match('([^,]+),(.+)')
+		country = ivar2.util.trim(country):upper()
+
+		return place, country
+	end
+
+	return input
+end
+
 local getUrl = function(self, source, destination, place)
 	local lang = self.persist['yr:lang:'..source.nick]
 	if(not lang) then
@@ -226,164 +231,113 @@ end
 
 local getPlace = function(self, source, destination, input)
 	if(not input or input == '') then
-		local place = self.persist['yr:place:'..source.nick]
-		if(not place) then
+		local persist = self.persist['yr:place:'..source.nick]
+		if(not persist) then
 			local patt = self:ChannelCommandPattern('^%pset yr <location>', "yr", destination):sub(1)
 			self:Msg('privmsg', destination, source, 'Usage: '..patt)
 			return
-		else
-			input = place
 		end
+
+		input = persist
 	end
 	input = ivar2.util.trim(input):lower()
 	local inputISO = utf2iso:iconv(input)
 
-	local country
-	local _
-	if(input:find(',', 1, true)) then
-		input, country = input:match('([^,]+),(.+)')
-		country = ivar2.util.trim(country):upper()
-		inputISO, _ = input:match('([^,]+),(.+)')
-	end
+	return splitInput(input)
+end
 
+local getPlaceNorway = function(place)
 	local db = sql.open("cache/places-norway.sql")
 	local selectStmt = db:prepare("SELECT name, url FROM places WHERE name = ? OR name = ?")
-	selectStmt:bind_values(input, inputISO)
+
+	local placeISO = utf2iso:iconv(place)
+	selectStmt:bind_values(place, placeISO)
 
 	local iter, vm = selectStmt:nrows()
-	local place = iter(vm)
+	local data = iter(vm)
 
 	db:close()
 
-	if(place) then
-		place.name = ivar2.util.trim(place.name)
-		place.url = ivar2.util.trim(place.url)
-		return place
-	else
-		local db = sql.open("cache/places.sql")
-		local selectStmt
-		if(country) then
-			selectStmt = db:prepare([[
-				SELECT
-					geonameid, name,countryCode, population
-				FROM places
-				WHERE
-					(name = ? OR name = ?)
-					AND countryCode = ?
-				ORDER BY
-				population DESC
-			]])
-			selectStmt:bind_values(input, inputISO, country)
-		else
-			selectStmt = db:prepare([[
-				SELECT
-					geonameid, name,countryCode, population
-				FROM places
-				WHERE
-					(name = ? OR name = ?)
-				ORDER BY
-				population DESC
-			]])
-			selectStmt:bind_values(input, inputISO)
-		end
-
-		local iter, vm = selectStmt:nrows()
-		local place = iter(vm)
-
-		db:close()
-		if(place) then
-			return place
-		end
-	end
+	return data
 end
 
-local urlBase = "http://api.geonames.org/hierarchyJSON?geonameId=%d&username=haste"
-
+local apiBase = 'http://api.geonames.org/searchJSON?name=%s&featureClass=P&username=haste'
 return {
 	PRIVMSG = {
 		['^%pyr(7?)%s*(.*)$'] = function(self, source, destination, seven, input)
-			input = ivar2.util.trim(input):lower()
-			local place = getPlace(self, source, destination, input)
+			local place, country = getPlace(self, source, destination, input)
+			local result = getPlaceNorway(place)
 
-			if(place) then
-				if(place.url) then
-					ivar2.util.simplehttp(
-						place.url,
-						function(data)
-							handleOutput(source, destination, seven == '7', data)
-						end
-					)
-					return
-				end
-
-				if(place.geonameid) then
-					ivar2.util.simplehttp(
-						urlBase:format(place.geonameid),
-						function(data)
-							data = ivar2.util.json.decode(data)
-							local city = data.geonames[#data.geonames]
-							if(city.adminName1 == "") then city.adminName1 = "Other" end
-
-							ivar2.util.simplehttp(
-								("http://yr.no/place/%s/%s/%s/varsel.xml"):format(
-									yrUrlEncode(city.countryName),
-									yrUrlEncode(city.adminName1),
-									yrUrlEncode(city.toponymName)
-								),
-								function(data)
-									handleOutput(source, destination, seven == '7', data, city)
-								end
-							)
-						end
-					)
-				end
-			else
-				ivar2:Msg('privmsg', destination, source, "Does that place even exist?")
-			end
-		end,
-		['^%ptemp (.+)$'] = function(self, source, destination, input)
-			local place = getPlace(self, source, destination, input)
-
-			if(place) then
-				ivar2.util.simplehttp(
-					getUrl(self, source, destination, place),
+			if(result) then
+				self.util.simplehttp(
+					result.url,
 					function(data)
-						say(handleObservationOutput(self, source, destination, data))
+						handleOutput(source, destination, seven == '7', data)
 					end
 				)
 				return
 			end
+
+			local url = apiBase:format(self.util.urlEncode(place))
+			if(country) then
+				url = url .. '&country=' .. country
+			end
+
+			self.util.simplehttp(
+				url,
+				function(data)
+					local json = self.util.json.decode(data)
+					if(json.totalResultsCount == 0) then
+						return self:Msg('privmsg', destination, source, "Does that place even exist?")
+					end
+
+					local city = json.geonames[1]
+					if(city.adminName1 == "") then city.adminName1 = "Other" end
+
+					self.util.simplehttp(
+						("http://yr.no/place/%s/%s/%s/varsel.xml"):format(
+							yrUrlEncode(city.countryName),
+							yrUrlEncode(city.adminName1),
+							yrUrlEncode(city.toponymName)
+						),
+						function(data)
+							handleOutput(source, destination, seven == '7', data, city)
+						end
+					)
+				end
+			)
 		end,
-		['^%ptemp$'] = function(self, source, destination)
 
-			local place = getPlace(self, source, destination)
+		-- Currently only handles Norwegian cities.
+		['^%ptemp%s*(.*)$'] = function(self, source, destination, input)
+			local place = getPlace(self, source, destination, input)
+			local result = getPlaceNorway(place)
 
-			if(place) then
-				ivar2.util.simplehttp(
-					getUrl(self, source, destination, place),
+			if(result) then
+				self.util.simplehttp(
+					getUrl(self, source, destination, result),
 					function(data)
 						say(handleObservationOutput(self, source, destination, data))
 					end
 				)
-				return
-
 			end
 		end,
+
 		['^%pset yr (.+)$'] = function(self, source, destination, location)
 			self.persist['yr:place:'..source.nick] = location
 			reply('Location set to %s', location)
 		end,
-		['^%pset yrlang (.+)$'] = function(self, source, destination, lang)
-			lang = ivar2.util.trim(lang:lower())
-			local langISO = iso2utf:iconv(lang)
-			if(lang == 'nynorsk' or lang == 'bokmål' or lang == 'english' or langISO == 'bokmål') then
-				if(lang == 'nynorsk') then
-					lang = 'stad'
-				elseif(lang == 'bokmål' or langISO == 'bokmål') then
-					lang = 'sted'
-				elseif(lang == 'english') then
-					lang = 'place'
-				end
+
+		['^%pset yrlang (.+)$'] = function(self, source, destination, input)
+			local languages = {
+				['nynorsk'] = 'stad',
+				['bokmål'] = 'sted',
+				['english'] = 'place',
+			}
+
+			input = lower(self.util.trim(input))
+			local lang = languages[input]
+			if(lang) then
 				self.persist['yr:lang:'..source.nick] = lang
 				reply('I shall not forget. I am good at remembering things.')
 			else

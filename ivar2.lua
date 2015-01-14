@@ -636,29 +636,23 @@ end
 function ivar2:ModuleCall(func, source, destination, remainder, ...)
 	-- Construct a environment for each callback that provide some helper
 	-- functions and utilities for the modules
-
-	local env = {
-		ivar2 = self,
-		say = function(str, ...)
-			local output = safeFormat(str, ...)
-			if(not remainder) then
-				self:Say(destination, source, output)
-			else
-				local command, remainder = self:CommandSplitter(remainder)
-				local newline = command .. " " .. output
-				if remainder ~= '' then
-					newline = newline .. "|" .. remainder
-				end
-				self:DispatchCommand('PRIVMSG', newline, source, destination)
+	local env = getfenv(func)
+	env.say = function(str, ...)
+		local output = safeFormat(str, ...)
+		if(not remainder) then
+			self:Say(destination, source, output)
+		else
+			local command, remainder = self:CommandSplitter(remainder)
+			local newline = command .. " " .. output
+			if remainder ~= '' then
+				newline = newline .. "|" .. remainder
 			end
-		end,
-		reply = function(str, ...)
-			self:Reply(destination, source, str, ...)
+			self:DispatchCommand('PRIVMSG', newline, source, destination)
 		end
-	}
-
-	setmetatable(env, {__index = _G })
-	setfenv(func, env)
+	end
+	env.reply = function(str, ...)
+		self:Reply(destination, source, str, ...)
+	end
 
 	return pcall(func, self, source, destination, ...)
 end
@@ -725,6 +719,11 @@ function ivar2:Connect(config)
 		self.x0 = assert(loadfile('core/x0.lua'))(ivar2)
 	end
 
+	if(not self.webserver) then
+		self.webserver = assert(loadfile('core/webserver.lua'))(ivar2)
+		self.webserver.start(self.config.webserverhost, self.config.webserverport)
+	end
+
 	if(self.timeout) then
 		self.timeout:stop(self.Loop)
 	end
@@ -770,8 +769,10 @@ function ivar2:Reload()
 	else
 		self.control:stop(self.Loop)
 		self.timeout:stop(self.Loop)
+		if self.webserver then
+			self.webserver:stop()
+		end
 
-		message.webserver = self.webserver
 		message.persist = self.persist
 		message.socket = self.socket
 		-- reload configuration file
@@ -800,6 +801,10 @@ function ivar2:Reload()
 		-- Reload irclib
 		package.loaded.irc = nil
 		irc = require'irc'
+		-- Reload webserver
+		message.webserver = assert(loadfile('core/webserver.lua'))(message)
+		message.webserver.start(message.config.webserverhost, message.config.webserverport)
+
 		message.network = self.network
 		message.hostmask = self.hostmask
 		message.maxNickLength = self.maxNickLength
@@ -808,15 +813,15 @@ function ivar2:Reload()
 
 		message:LoadModules()
 		message.updated = true
-		self.socket:sethandler(message)
 
 		self = message
+		self.timeout = self:Timer('_timeout', 60*6, 60*6, self.timeoutFunc(self))
+		self.socket:sethandler(message)
 
 		self.x0 = assert(loadfile('core/x0.lua'))(self)
 		self.control = assert(loadfile('core/control.lua'))(self)
 		self.control:start(self.Loop)
 
-		self.timeout = self:Timer('_timeout', 60*6, 60*6, self.timeoutFunc(self))
 
 		self:Log('info', 'Successfully update core.')
 	end

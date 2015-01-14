@@ -7,7 +7,14 @@ local moduleName = 'twitch'
 local key = moduleName
 local store = ivar2.persist
 
-local parseData = function(self, source, destination, data)
+local formatViewers = function (viewers)
+	if viewers > 1000 then
+		return tostring(math.floor(viewers/1000)) .. 'k'
+	end
+	return viewers
+end
+
+local parseData = function(self, source, destination, data, search)
 	data = json.decode(data)
 
 	if data._total == 0 then
@@ -17,11 +24,19 @@ local parseData = function(self, source, destination, data)
 	local streams = {}
 	for i=1, #data.streams do
 		local this = data.streams[i]
+		local lang = this.channel.broadcaster_language
 		--TODO configure filter languages ?
-		if this.channel.broadcaster_language
-			and (this.channel.broadcaster_language == 'en' or
-			     this.channel.broadcaster_language == 'no') then
-			table.insert(streams, this)
+		if lang and (lang == 'en' or lang == 'no') then
+			if search then
+				-- Check for search string in game or channel name
+				-- since twitch search API also does title search
+				if this.channel.display_name:lower():match(search:lower())
+					or this.game:lower():match(search:lower()) then
+					table.insert(streams, this)
+				end
+			else
+				table.insert(streams, this)
+			end
 		end
 	end
 
@@ -35,10 +50,7 @@ local formatData = function(self, source, destination, streams, limit)
 	local i = 0
 	local out = {}
 	for _, stream in pairs(streams) do
-		local viewers = tostring(math.floor(stream.viewers/1000)) .. 'k'
-		if viewers == '0k' then
-			viewers = stream.viewers
-		end
+		local viewers = formatViewers(stream.viewers)
 		local title = ''
 		if stream.channel and stream.channel.status then
 			title = ': '..stream.channel.status
@@ -96,12 +108,13 @@ local checkStreams = function()
 		for name, game in pairs(games) do
 			local limit = 5
 			simplehttp(
-				'https://api.twitch.tv/kraken/search/streams?limit='
-					..tostring(limit)..
-					'&offset=0&query='
-					..util.urlEncode(game.name),
+				string.format(
+					'https://api.twitch.tv/kraken/search/streams?limit=%s&offset=0&query=%s',
+					tostring(limit),
+					util.urlEncode(game.name)
+				),
 				function(data)
-					local streams = parseData(ivar2, nil, c, data, limit)
+					local streams = parseData(ivar2, nil, c, data, game.name)
 					for _, stream in pairs(streams) do
 						-- Use Created At to check for uniqueness
 						if alerts[stream.channel.name] ~= stream.created_at and
@@ -114,7 +127,7 @@ local checkStreams = function()
 								ivar2.nick,
 								"[%s] [%s] %s %s",
 								util.bold(game.name),
-								util.bold(tostring(math.floor(stream.viewers/1000))..'k'),
+								util.bold(formatViewers(stream.viewers)),
 								'http://twitch.tv/'..stream.channel.display_name,
 								stream.channel.status
 							)
